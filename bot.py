@@ -60,6 +60,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # необязательно: с этого сервера убираются старые дубли команд
 USE_MESSAGE_CONTENT = os.getenv("USE_MESSAGE_CONTENT", "0") == "1"
+SYNC_COMMANDS = os.getenv("SYNC_COMMANDS", "0") == "1"
 PROXY_URL = os.getenv("PROXY_URL") or None  # например http://127.0.0.1:8080, если Discord доступен только через прокси
 
 MIN_ACCOUNT_AGE_DAYS = int(os.getenv("MIN_ACCOUNT_AGE_DAYS", "30"))  # устарело: теперь /mod shield setup (по умолчанию 30)
@@ -191,6 +192,18 @@ def merge_settings():
     bot.tree.add_command(roots["setting"])
 
 
+async def sync_all_commands() -> list[str]:
+    """Синхронизирует глобальные команды и команды DEV_GUILD_ID."""
+    synced = await bot.tree.sync()
+    if DEV_GUILD_ID:
+        import licensing
+        guild = discord.Object(id=int(DEV_GUILD_ID))
+        bot.tree.clear_commands(guild=guild)
+        bot.tree.add_command(licensing.KEY_GROUP, guild=guild)
+        await bot.tree.sync(guild=guild)
+    return sorted(c.name for c in synced)
+
+
 @bot.event
 async def setup_hook():
     await load_app_emojis(bot)
@@ -208,29 +221,18 @@ async def setup_hook():
                 )
             raise
     merge_settings()
-    try:
-        # Команды всегда регистрируются глобально — так они есть на ВСЕХ серверах.
-        synced = await bot.tree.sync()
-        where = "все серверы"
-        if DEV_GUILD_ID:
-            # Раньше команды регистрировались только для этого сервера.
-            # Убираем те старые копии, иначе там каждая команда будет показана дважды.
-            # Здесь же — команды владельца /key (их видно только на вашем сервере).
-            import licensing
-            guild = discord.Object(id=int(DEV_GUILD_ID))
-            bot.tree.clear_commands(guild=guild)
-            bot.tree.add_command(licensing.KEY_GROUP, guild=guild)
-            await bot.tree.sync(guild=guild)
-    except discord.HTTPException as e:
-        raise SystemExit(
-            f"\nDiscord не принял список команд: {e}\n"
-            "Пришлите этот текст целиком, я исправлю."
-        )
     logging.info("Сборка %s. Команды бота: %s", BUILD, commands_overview())
-    names = sorted(c.name for c in synced)
-    logging.info("Команды синхронизированы (%s): %d шт.: %s", where, len(names), ", ".join(names))
-    if "all" not in names:
-        logging.warning("Команды /all нет в списке: проверьте, что файл guide.py лежит в папке бота")
+
+    if SYNC_COMMANDS:
+        try:
+            names = await sync_all_commands()
+            logging.info("Команды синхронизированы (все серверы): %d шт.: %s", len(names), ", ".join(names))
+            if "all" not in names:
+                logging.warning("Команды /all нет в списке: проверьте, что файл guide.py лежит в папке бота")
+        except discord.HTTPException as e:
+            logging.error("Discord не принял список команд при запуске: %s", e)
+    else:
+        logging.info("Автосинхронизация команд отключена (SYNC_COMMANDS=0). Для обновления используйте /setting bot sync")
 
 
 @bot.event
@@ -239,252 +241,3 @@ async def on_ready():
 
 
 async def send_log(guild: discord.Guild, text: str):
-    channel_id = db.get_setting(guild.id, "log_channel")
-    channel = guild.get_channel(channel_id) if channel_id else None
-    if channel:
-        try:
-            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException:
-            pass
-
-
-# ---------- Приветствие, рейды ----------
-@bot.event
-async def on_member_join(member: discord.Member):
-    if member.bot:
-        return
-    guild = member.guild
-
-    # Защита от рейдов: много входов за короткое время
-    now = time.monotonic()
-    joins = recent_joins[guild.id]
-    joins.append(now)
-    while joins and now - joins[0] > RAID_WINDOW:
-        joins.popleft()
-    if len(joins) >= RAID_JOINS:
-        joins.clear()
-        await send_log(
-            guild,
-            f"Возможный рейд: {RAID_JOINS}+ входов за {RAID_WINDOW} сек. Проверьте новичков.",
-        )
-
-    # Слишком новый аккаунт (моложе 30 дней): кик или уведомление персоналу — см. shield.py
-    if await shield.handle_join(member):
-        return
-
-    previous = db.register_join(guild.id, member.id)
-    db.set_first_join(guild.id, member.id, int(time.time()))
-
-    channel_id = db.get_setting(guild.id, "welcome_channel")
-    channel = guild.get_channel(channel_id) if channel_id else None
-    if not channel:
-        return
-
-    ts = int(member.created_at.timestamp())
-    if previous == 0:
-        title = f"{EMOJI['title']} **{member.display_name}**, добро пожаловать!"
-    else:
-        title = f"{EMOJI['heart']} **{member.display_name}**, с возвращением!"
-    memo = db.get_memo(guild.id) or {}
-    start = f" Начни с <#{memo['channel_id']}>." if memo.get("channel_id") else ""
-    embed = discord.Embed(
-        description=f"{title}\nТы у нас {guild.member_count}-й.{start}\n-# в Discord с <t:{ts}:D>",
-        color=0x2B2D31,
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    try:
-        await channel.send(embed=embed)
-    except discord.HTTPException:
-        logging.warning("Не удалось отправить приветствие на сервере %s", guild.id)
-
-
-# ---------- Защита от спама ----------
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or message.guild is None:
-        return
-    # Новичкам нельзя файлы/ссылки/стикеры первые часы — см. shield.py
-    if await shield.handle_message(message):
-        return
-    member = message.author
-    perms = message.channel.permissions_for(member)
-    if perms.manage_messages or perms.administrator:
-        return
-
-    # Слишком частые сообщения -> таймаут
-    now = time.monotonic()
-    history = recent_messages[(message.guild.id, member.id)]
-    history.append(now)
-    if len(history) == SPAM_MESSAGES and now - history[0] <= SPAM_WINDOW:
-        history.clear()
-        try:
-            await member.timeout(
-                timedelta(minutes=SPAM_TIMEOUT_MIN), reason="Спам"
-            )
-            await message.channel.send(
-                f"{member.mention}, не спамь. Мут на {SPAM_TIMEOUT_MIN} мин.",
-                delete_after=10,
-            )
-            await send_log(message.guild, f"Спам: таймаут {member.mention}")
-        except discord.Forbidden:
-            await send_log(
-                message.guild,
-                f"Нет прав на таймаут: роль бота выше ролей участников + «Модерировать участников».",
-            )
-        return
-
-    # Ссылки-приглашения (нужен Message Content Intent)
-    if USE_MESSAGE_CONTENT and INVITE_RE.search(message.content):
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
-        await message.channel.send(
-            f"{member.mention}, приглашения запрещены.", delete_after=10
-        )
-        await send_log(message.guild, f"Удалено приглашение от {member.mention}")
-
-
-# ---------- Команды ----------
-@bot.tree.command(name="ping", description="Проверить, что бот жив")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"{round(bot.latency * 1000)} мс", ephemeral=True)
-
-
-bot_setting = app_commands.Group(name="bot_setting", description="Настройки бота", guild_only=True)
-bot.tree.add_command(bot_setting)
-
-
-@bot_setting.command(name="welcome", description="Выбрать канал для приветствий")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setup_welcome(interaction: discord.Interaction, channel: discord.TextChannel):
-    db.set_setting(interaction.guild_id, "welcome_channel", channel.id)
-    await interaction.response.send_message(
-        f"Приветствия: {channel.mention}", ephemeral=True
-    )
-
-
-@bot_setting.command(name="logs", description="Выбрать канал для логов защиты")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def setup_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-    db.set_setting(interaction.guild_id, "log_channel", channel.id)
-    await interaction.response.send_message(
-        f"Логи: {channel.mention}", ephemeral=True
-    )
-
-
-@bot_setting.command(name="check", description="Версия бота и список зарегистрированных команд")
-async def check(interaction: discord.Interaction):
-    perms = interaction.user.guild_permissions
-    if not (perms.administrator or perms.manage_guild):
-        await interaction.response.send_message("Только для администраторов.", ephemeral=True)
-        return
-    await interaction.response.send_message(
-        f"**Сборка:** {BUILD}\n**Команды:** {commands_overview()}"[:1900], ephemeral=True
-    )
-
-
-@bot_setting.command(name="backup", description="Прислать копию базы данных бота (только администраторам)")
-async def backup(interaction: discord.Interaction):
-    perms = interaction.user.guild_permissions
-    if not (perms.administrator or perms.manage_guild):
-        await interaction.response.send_message("Только для администраторов: в базе данные участников.", ephemeral=True)
-        return
-    await interaction.response.defer(ephemeral=True)
-    try:
-        path = make_backup()
-    except Exception as e:
-        logging.exception("Не удалось сделать копию базы")
-        await interaction.followup.send(f"Не удалось сделать копию: {type(e).__name__}", ephemeral=True)
-        return
-    await interaction.followup.send(
-        "Копия базы. Храните её в безопасном месте, в ней данные участников.",
-        file=discord.File(path), ephemeral=True,
-    )
-
-
-@bot.tree.command(name="rules", description="Отправить сообщение с правилами сервера")
-@app_commands.describe(channel="Канал для правил (по умолчанию текущий)")
-@app_commands.guild_only()
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def rules(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
-    target = channel or interaction.channel
-    await interaction.response.defer(ephemeral=True)
-    try:
-        await post_components(bot, target, build_rules_payload())
-    except discord.HTTPException as e:
-        await interaction.followup.send(f"Не удалось: {e}", ephemeral=True)
-        return
-    await interaction.followup.send(f"Правила в {target.mention}", ephemeral=True)
-
-
-@bot.tree.command(name="roll", description="Бросить кубик")
-@app_commands.describe(sides="Сколько граней (по умолчанию 6)")
-async def roll(interaction: discord.Interaction, sides: app_commands.Range[int, 2, 1000] = 6):
-    await interaction.response.send_message(f"**{random.randint(1, sides)}** из {sides}")
-
-
-@bot.tree.command(name="ball", description="Шар предсказаний")
-@app_commands.describe(question="Ваш вопрос")
-async def ball(interaction: discord.Interaction, question: str):
-    answers = [
-        "Да", "Нет", "Скорее да", "Скорее нет", "Спроси позже",
-        "Без сомнений", "Даже не думай", "Всё возможно",
-    ]
-    await interaction.response.send_message(f"{question}\n**{random.choice(answers)}**")
-
-
-@bot.tree.command(name="choose", description="Выбрать случайный вариант")
-@app_commands.describe(options="Варианты через запятую")
-async def choose(interaction: discord.Interaction, options: str):
-    items = [x.strip() for x in options.split(",") if x.strip()]
-    if len(items) < 2:
-        await interaction.response.send_message("Напишите минимум два варианта через запятую.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"**{random.choice(items)}**")
-
-
-@bot.tree.command(name="serverinfo", description="Информация о сервере")
-@app_commands.guild_only()
-async def serverinfo(interaction: discord.Interaction):
-    guild = interaction.guild
-    ts = int(guild.created_at.timestamp())
-    await interaction.response.send_message(
-        f"## {guild.name}\nУчастников: {guild.member_count}, бустов: {guild.premium_subscription_count}\n"
-        f"-# создан <t:{ts}:D>", ephemeral=True
-    )
-
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        text = "У тебя нет прав на это."
-    else:
-        logging.exception("Ошибка команды", exc_info=error)
-        text = "Что-то пошло не так, попробуй ещё раз."
-    if interaction.response.is_done():
-        await interaction.followup.send(text, ephemeral=True)
-    else:
-        await interaction.response.send_message(text, ephemeral=True)
-
-
-if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("Не найден DISCORD_TOKEN. Создайте файл .env (см. .env.example).")
-    try:
-        bot.run(TOKEN, log_handler=None)
-    except discord.PrivilegedIntentsRequired:
-        raise SystemExit(
-            "Включите Server Members Intent (и Message Content Intent, если "
-            "USE_MESSAGE_CONTENT=1) в Developer Portal → Bot → Privileged Gateway Intents."
-        )
-    except (aiohttp.ClientError, OSError) as e:
-        print(
-            "\nНет связи с Discord (discord.com:443): " + str(e) + "\n"
-            "Это проблема сети, а не бота. Проверьте, что программа обхода блокировок запущена и "
-            "действует на ВСЕ программы (не только на Discord и браузер), или включите VPN на весь "
-            "компьютер, или укажите прокси в PROXY_URL в файле .env.\n"
-            "Для диагностики запустите netcheck.bat из папки бота и пришлите, что он покажет."
-        )
-        sys.exit(1)
