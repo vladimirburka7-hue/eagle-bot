@@ -1,0 +1,82 @@
+{
+  "config": {
+    "news": 1530526688499470428,
+    "reviews": 1553848576831135784,
+    "category": 1553698505996902432,
+    "logs": 1553853652190367784,
+    "staff": 1553697915703267459,
+    "client": 1548748358011584643,
+    "memo_ch": 1553687233045729321,
+    "memo_msg": 1568371434936598749,
+    "guide_msg": 1568371439785087057
+  },
+  "tiers": {
+    "1": {
+      "name": "Базовый",
+      "price": "договорная",
+      "desc": "Приветствие, автороли, простые команды"
+    },
+    "2": {
+      "name": "Стандарт",
+      "price": "договорная",
+      "desc": "Заявки и тикеты с кнопками, панели Components V2, логи"
+    },
+    "3": {
+      "name": "Про",
+      "price": "договорная",
+      "desc": "Своя система: войсы, автомодерация, база данных, экономика"
+    }
+  },
+  "counter": 2,
+  "orders": {},
+  "reviews": [
+    {
+      "user": 1442067168928858207,
+      "stars": 5,
+      "app": "0",
+      "date": "07.11.2026"
+    }
+  ],
+  "apps": {
+    "01": {
+      "num": "01",
+      "user": 1442067168928858207,
+      "name": "The p1neyy",
+      "avatar": "https://cdn.discordapp.com/avatars/1442067168928858207/8737f2ffbd6dfb5141730affdfe39516.png?size=1024",
+      "status": "done",
+      "claimed_by": null,
+      "decided_by": 1442067168928858207,
+      "temp": null,
+      "reviewed": false,
+      "date": "07.11.2026",
+      "guild": 1530526687375130625,
+      "what": "фыф",
+      "details": "ыфы",
+      "server": "фыфы",
+      "budget": "фыфы",
+      "deadline": "фы",
+      "log_ch": 1553853652190367784,
+      "log_msg": 1568369618719080490
+    },
+    "02": {
+      "num": "02",
+      "user": 1442067168928858207,
+      "name": "The p1neyy",
+      "avatar": "https://cdn.discordapp.com/avatars/1442067168928858207/8737f2ffbd6dfb5141730affdfe39516.png?size=1024",
+      "status": "rejected",
+      "claimed_by": null,
+      "decided_by": 1442067168928858207,
+      "temp": null,
+      "reviewed": false,
+      "date": "08.11.2026",
+      "guild": 1530526687375130625,
+      "what": "фыф",
+      "details": "ыфы",
+      "server": "фыфы",
+      "budget": "фы",
+      "deadline": "фыыф",
+      "log_ch": 1553853652190367784,
+      "log_msg": 1569068015750746304
+    }
+  }
+}
